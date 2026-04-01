@@ -75,7 +75,7 @@ router.post('/verify', async (req, res) => {
     
     const similarity = results.rows[0]?.similarity || 0;
     
-    if (parseFloat(similarity) > 0.6) {
+    if (parseFloat(similarity) > 0.7) {
       res.json({
         success: true,
         user: results.rows[0],
