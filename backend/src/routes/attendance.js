@@ -1,5 +1,6 @@
 const express = require('express');
 const router  = express.Router();
+const { sendNotification } = require('../config/notify');
 const { pool } = require('../db');
 const { authenticateToken } = require('../middleware/auth');
 const multer = require('multer');
@@ -82,7 +83,23 @@ router.post('/mark', upload.single('image'), async (req, res) => {
        RETURNING *`,
       [sessionId, userId, status, confidence]
     );
-
+const historyCheck = await pool.query(
+  `SELECT COUNT(*) AS total,
+     COUNT(CASE WHEN status='present' THEN 1 END) AS present
+   FROM attendance WHERE user_id=$1`,
+  [userId]
+);
+const tot = parseInt(historyCheck.rows[0].total);
+const pre = parseInt(historyCheck.rows[0].present);
+const pct = tot > 0 ? Math.round(pre / tot * 100) : 100;
+if (pct < 75 && tot >= 2) {
+  await sendNotification(
+    userId,
+    'Low Attendance Warning',
+    `Your attendance is ${pct}%. Minimum required is 75%.`,
+    'warning'
+  );
+}
     res.json({ marked: true, status, match: mlData.match, confidence, record: result.rows[0] });
   } catch (err) {
     res.status(500).json({ error: err.message });

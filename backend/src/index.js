@@ -15,6 +15,8 @@ app.get('/health', (req, res) => res.json({ status: 'FaceAttend API LIVE' }));
 app.use('/api/auth', authRoutes);
 app.use('/api/face', faceRoutes);
 app.use('/api/attendance', require('./routes/attendance'));
+app.use('/api/dashboard',  require('./routes/dashboard'));
+app.use('/api/reports',    require('./routes/reports'));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
