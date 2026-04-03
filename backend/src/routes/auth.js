@@ -35,11 +35,12 @@ router.post('/login', async (req, res) => {
     if (user.rows.length === 0) {
       return res.status(401).json({ error: 'Invalid email' });
     }
-    
-    const valid = await bcrypt.compare(password, user.rows[0].password);
+    const valid = await bcrypt.compare(password, user.rows[0].password_hash || user.rows[0].password);
+
     if (!valid) {
       return res.status(401).json({ error: 'Invalid password' });
     }
+    
     
     const token = jwt.sign({ userId: user.rows[0].id }, process.env.JWT_SECRET || 'faceattend2026');
     

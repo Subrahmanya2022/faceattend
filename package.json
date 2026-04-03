@@ -1,6 +1,0 @@
-,
-  "scripts": {
-    "start": "node src/index.js",
-    "dev": "nodemon src/index.js",
-    "migrate": "node src/config/migrate.js"
-  }
