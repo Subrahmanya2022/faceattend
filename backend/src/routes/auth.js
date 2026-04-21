@@ -45,7 +45,7 @@ router.post('/login', async (req, res) => {
     const token = jwt.sign({ userId: user.rows[0].id }, process.env.JWT_SECRET || 'faceattend2026');
     
     res.json({
-      user: { id: user.rows[0].id, name: user.rows[0].name, email: user.rows[0].email, role: user.rows[0].role },
+      user: { id: user.rows[0].id, name: user.rows[0].name, email: user.rows[0].email, role: user.rows[0].role, org_id: user.rows[0].org_id},
       token
     });
   } catch (err) {
