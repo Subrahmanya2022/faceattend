@@ -38,7 +38,7 @@ class FaceEngine:
             result = DeepFace.represent(
                 img_path=np.array(image),
                 model_name=self.model_name,
-                enforce_detection=False  # Skip face detection for tiny test image
+                enforce_detection=True # Skip face detection for tiny test image
             )
             
             embedding = np.array(result[0]["embedding"], dtype=np.float32)

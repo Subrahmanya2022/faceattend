@@ -76,11 +76,27 @@ router.post('/', authenticateToken, requireRole('superadmin'), async (req, res) 
 
 // DELETE /api/organisations/:id — superadmin only
 router.delete('/:id', authenticateToken, requireRole('superadmin'), async (req, res) => {
+  const client = await pool.connect();
   try {
-    await pool.query('DELETE FROM organisations WHERE id=$1', [req.params.id]);
+    await client.query('BEGIN');
+    await client.query('DELETE FROM session_invites WHERE session_id IN (SELECT s.id FROM sessions s JOIN classes c ON s.class_id=c.id WHERE c.org_id=$1)', [req.params.id]);
+    await client.query('DELETE FROM attendance WHERE session_id IN (SELECT s.id FROM sessions s JOIN classes c ON s.class_id=c.id WHERE c.org_id=$1)', [req.params.id]);
+    await client.query('DELETE FROM sessions WHERE class_id IN (SELECT id FROM classes WHERE org_id=$1)', [req.params.id]);
+    await client.query('DELETE FROM enrolments WHERE class_id IN (SELECT id FROM classes WHERE org_id=$1)', [req.params.id]);
+    await client.query('DELETE FROM classes WHERE org_id=$1', [req.params.id]);
+    await client.query('DELETE FROM invitations WHERE org_id=$1', [req.params.id]);
+    await client.query('DELETE FROM messages WHERE org_id=$1', [req.params.id]);
+    await client.query('DELETE FROM notifications WHERE user_id IN (SELECT id FROM users WHERE org_id=$1)', [req.params.id]);
+    await client.query('DELETE FROM face_embeddings WHERE user_id IN (SELECT id FROM users WHERE org_id=$1)', [req.params.id]);
+    await client.query('DELETE FROM users WHERE org_id=$1', [req.params.id]);
+    await client.query('DELETE FROM organisations WHERE id=$1', [req.params.id]);
+    await client.query('COMMIT');
     res.json({ deleted: true, orgId: req.params.id });
   } catch (err) {
+    await client.query('ROLLBACK');
     res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
   }
 });
 
