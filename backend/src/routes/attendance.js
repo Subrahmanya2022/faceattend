@@ -8,6 +8,7 @@ const fetch  = (...args) => import('node-fetch').then(({ default: fetch }) => fe
 
 const upload     = multer({ storage: multer.memoryStorage() });
 const ML_SERVICE = 'http://localhost:8001';
+const ML_URL = process.env.ML_URL || 'http://192.168.1.112:8001';
 
 function requireRole(role) {
   return (req, res, next) => {
@@ -48,63 +49,181 @@ router.post('/close', authenticateToken, requireRole('teacher'), async (req, res
 router.post('/mark', upload.single('image'), async (req, res) => {
   try {
     const { userId, sessionId } = req.body;
-    if (!userId || !sessionId) return res.status(400).json({ error: 'userId and sessionId required' });
+    if (!userId || !sessionId) {
+      return res.status(400).json({ error: 'userId and sessionId required' });
+    }
 
+    // Check session is active
     const session = await pool.query(
-      'SELECT * FROM sessions WHERE id=$1 AND closed_at IS NULL', [sessionId]
+      "SELECT * FROM sessions WHERE id=$1 AND status='active'",
+      [sessionId]
     );
-    if (!session.rows.length) return res.status(400).json({ error: 'Session is closed or does not exist' });
+    if (!session.rows.length) {
+      return res.status(400).json({ error: 'Session is not active' });
+    }
 
+    // Check already marked
     const existing = await pool.query(
-      'SELECT id FROM attendance WHERE session_id=$1 AND user_id=$2', [sessionId, userId]
+      'SELECT id FROM attendance WHERE session_id=$1 AND user_id=$2',
+      [sessionId, userId]
     );
-    if (existing.rows.length) return res.status(400).json({ error: 'Already marked for this session' });
+    if (existing.rows.length) {
+      return res.status(400).json({ error: 'Already marked for this session' });
+    }
 
+    // Check face enrolled
     const faceRow = await pool.query(
-      'SELECT embedding FROM face_embeddings WHERE user_id=$1 ORDER BY created_at DESC LIMIT 1', [userId]
+      'SELECT embedding FROM face_embeddings WHERE user_id=$1 LIMIT 1',
+      [userId]
     );
-    if (!faceRow.rows.length) return res.status(404).json({ error: 'Face not enrolled for this user' });
+    if (!faceRow.rows.length) {
+      return res.status(404).json({ error: 'Face not enrolled. Please enrol your face first.' });
+    }
 
+    // Get embedding from ML service
     const b64 = req.file.buffer.toString('base64');
-    const mlResponse = await fetch(`${ML_SERVICE}/verify`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ image: b64, stored_embedding: faceRow.rows[0].embedding })
-    });
-    const mlData = await mlResponse.json();
+    let status     = 'absent';
+    let confidence = 0;
+    let match      = false;
 
-    const status     = mlData.match ? 'present' : 'absent';
-    const confidence = mlData.distance || 0;
+    try {
+      const mlResponse = await fetch(`${ML_URL}/enroll`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ image: b64 }),
+      });
+      const mlData = await mlResponse.json();
 
+      if (mlData.embedding) {
+        const queryEmbedding = mlData.embedding.map(Number);
+        const vector         = `[${queryEmbedding.join(',')}]`;
+
+        // Compare with stored embedding using pgvector
+        const verifyResult = await pool.query(
+          `SELECT 1 - (fe.embedding <=> $1::vector) AS similarity
+           FROM face_embeddings fe
+           WHERE fe.user_id = $2
+           LIMIT 1`,
+          [vector, userId]
+        );
+
+        if (verifyResult.rows.length) {
+          const similarity = parseFloat(verifyResult.rows[0].similarity);
+confidence       = Math.max(0, similarity);
+
+          console.log(`🎯 User ${userId} similarity: ${similarity}`);
+
+          if (similarity > 0.70) {
+            status = 'present';
+            match  = true;
+          }
+        }
+      }
+    } catch (mlErr) {
+      console.error('ML error:', mlErr.message);
+      // If ML fails still record as absent
+    }
+
+    // Record attendance
     const result = await pool.query(
-      `INSERT INTO attendance (session_id, user_id, status, confidence, check_in, session_date, embedding)
-       VALUES ($1,$2,$3,$4,NOW(),CURRENT_DATE,
-         (SELECT embedding FROM face_embeddings WHERE user_id=$2 LIMIT 1))
+      `INSERT INTO attendance (session_id, user_id, status, confidence, check_in, session_date)
+       VALUES ($1,$2,$3,$4,NOW(),CURRENT_DATE)
        RETURNING *`,
       [sessionId, userId, status, confidence]
     );
-const historyCheck = await pool.query(
-  `SELECT COUNT(*) AS total,
-     COUNT(CASE WHEN status='present' THEN 1 END) AS present
-   FROM attendance WHERE user_id=$1`,
-  [userId]
-);
-const tot = parseInt(historyCheck.rows[0].total);
-const pre = parseInt(historyCheck.rows[0].present);
-const pct = tot > 0 ? Math.round(pre / tot * 100) : 100;
-if (pct < 75 && tot >= 2) {
-  await sendNotification(
-    userId,
-    'Low Attendance Warning',
-    `Your attendance is ${pct}%. Minimum required is 75%.`,
-    'warning'
-  );
-}
-    res.json({ marked: true, status, match: mlData.match, confidence, record: result.rows[0] });
+
+    // Check absenteeism warning
+    const historyCheck = await pool.query(
+      `SELECT COUNT(*) AS total,
+         COUNT(CASE WHEN status='present' THEN 1 END) AS present
+       FROM attendance WHERE user_id=$1`,
+      [userId]
+    );
+    const tot = parseInt(historyCheck.rows[0].total);
+    const pre = parseInt(historyCheck.rows[0].present);
+    const pct = tot > 0 ? Math.round(pre / tot * 100) : 100;
+    if (pct < 75 && tot >= 2) {
+      await sendNotification(
+        userId,
+        'Low Attendance Warning',
+        `Your attendance is ${pct}%. Minimum required is 75%.`,
+        'warning'
+      );
+    }
+
+    res.json({
+      marked:     true,
+      status,
+      match,
+      confidence,
+      record:     result.rows[0]
+    });
   } catch (err) {
+    console.error('❌ Mark error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
+
+// router.post('/mark', upload.single('image'), async (req, res) => {
+//   try {
+//     const { userId, sessionId } = req.body;
+//     if (!userId || !sessionId) return res.status(400).json({ error: 'userId and sessionId required' });
+
+//     const session = await pool.query(
+//       'SELECT * FROM sessions WHERE id=$1 AND closed_at IS NULL', [sessionId]
+//     );
+//     if (!session.rows.length) return res.status(400).json({ error: 'Session is closed or does not exist' });
+
+//     const existing = await pool.query(
+//       'SELECT id FROM attendance WHERE session_id=$1 AND user_id=$2', [sessionId, userId]
+//     );
+//     if (existing.rows.length) return res.status(400).json({ error: 'Already marked for this session' });
+
+//     const faceRow = await pool.query(
+//       'SELECT embedding FROM face_embeddings WHERE user_id=$1 ORDER BY created_at DESC LIMIT 1', [userId]
+//     );
+//     if (!faceRow.rows.length) return res.status(404).json({ error: 'Face not enrolled for this user' });
+
+//     const b64 = req.file.buffer.toString('base64');
+//     const mlResponse = await fetch(`${ML_SERVICE}/verify`, {
+//       method: 'POST',
+//       headers: { 'Content-Type': 'application/json' },
+//       body: JSON.stringify({ image: b64, stored_embedding: faceRow.rows[0].embedding })
+//     });
+//     const mlData = await mlResponse.json();
+
+//     const status     = mlData.match ? 'present' : 'absent';
+//     const confidence = mlData.distance || 0;
+
+//     const result = await pool.query(
+//       `INSERT INTO attendance (session_id, user_id, status, confidence, check_in, session_date, embedding)
+//        VALUES ($1,$2,$3,$4,NOW(),CURRENT_DATE,
+//          (SELECT embedding FROM face_embeddings WHERE user_id=$2 LIMIT 1))
+//        RETURNING *`,
+//       [sessionId, userId, status, confidence]
+//     );
+// const historyCheck = await pool.query(
+//   `SELECT COUNT(*) AS total,
+//      COUNT(CASE WHEN status='present' THEN 1 END) AS present
+//    FROM attendance WHERE user_id=$1`,
+//   [userId]
+// );
+// const tot = parseInt(historyCheck.rows[0].total);
+// const pre = parseInt(historyCheck.rows[0].present);
+// const pct = tot > 0 ? Math.round(pre / tot * 100) : 100;
+// if (pct < 75 && tot >= 2) {
+//   await sendNotification(
+//     userId,
+//     'Low Attendance Warning',
+//     `Your attendance is ${pct}%. Minimum required is 75%.`,
+//     'warning'
+//   );
+// }
+//     res.json({ marked: true, status, match: mlData.match, confidence, record: result.rows[0] });
+//   } catch (err) {
+//     res.status(500).json({ error: err.message });
+//   }
+// });
 
 router.get('/class/:classId', authenticateToken, requireRole('teacher'), async (req, res) => {
   try {
@@ -179,3 +298,60 @@ router.patch('/:id', authenticateToken, requireRole('teacher'), async (req, res)
 });
 
 module.exports = router;
+
+// POST /api/attendance/:id/request-correction — student requests correction
+router.post('/:id/request-correction', authenticateToken, async (req, res) => {
+  try {
+    const { reason } = req.body;
+    if (!reason) {
+      return res.status(400).json({ error: 'reason required' });
+    }
+
+    const record = await pool.query(
+      `SELECT a.*, s.class_id, c.teacher_id, c.org_id
+       FROM attendance a
+       JOIN sessions s ON a.session_id = s.id
+       JOIN classes  c ON s.class_id   = c.id
+       WHERE a.id=$1 AND a.user_id=$2`,
+      [req.params.id, req.user.id]
+    );
+    if (!record.rows.length) {
+      return res.status(404).json({ error: 'Attendance record not found' });
+    }
+
+    const rec = record.rows[0];
+
+    // Notify teacher
+    if (rec.teacher_id) {
+      await pool.query(
+        `INSERT INTO notifications (user_id, title, message, type)
+         VALUES ($1,$2,$3,'alert')`,
+        [rec.teacher_id,
+         `Attendance Correction Request`,
+         `${req.user.name} is requesting correction for attendance record #${req.params.id}. Reason: ${reason}`]
+      );
+    }
+
+    // Notify admin
+    const admin = await pool.query(
+      `SELECT id FROM users WHERE org_id=$1 AND role='admin' LIMIT 1`,
+      [rec.org_id]
+    );
+    if (admin.rows.length) {
+      await pool.query(
+        `INSERT INTO notifications (user_id, title, message, type)
+         VALUES ($1,$2,$3,'alert')`,
+        [admin.rows[0].id,
+         `Attendance Correction Request`,
+         `${req.user.name} is requesting correction for attendance record #${req.params.id}. Reason: ${reason}`]
+      );
+    }
+
+    res.json({
+      success: true,
+      message: 'Correction request sent to teacher and admin'
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});

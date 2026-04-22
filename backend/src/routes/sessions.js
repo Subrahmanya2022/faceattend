@@ -214,13 +214,24 @@ router.get('/:id', authenticateToken, async (req, res) => {
     if (!result.rows.length) return res.status(404).json({ error: 'Session not found' });
 
     const attendance = await pool.query(
-      `SELECT u.id, u.name, u.email, a.status, a.confidence, a.check_in
-       FROM enrolments e
-       JOIN users u ON e.student_id = u.id
-       LEFT JOIN attendance a ON a.user_id=e.student_id AND a.session_id=$1
-       WHERE e.class_id=$2`,
-      [req.params.id, result.rows[0].class_id]
-    );
+  `SELECT u.id AS user_id, u.name, u.email,
+     a.id, a.status, a.confidence, a.check_in
+   FROM enrolments e
+   JOIN users u ON e.student_id = u.id
+   LEFT JOIN attendance a ON a.user_id=e.student_id
+     AND a.session_id=$1
+   WHERE e.class_id=$2`,
+  [req.params.id, result.rows[0].class_id]
+);
+
+    // const attendance = await pool.query(
+    //   `SELECT u.id, u.name, u.email, a.status, a.confidence, a.check_in
+    //    FROM enrolments e
+    //    JOIN users u ON e.student_id = u.id
+    //    LEFT JOIN attendance a ON a.user_id=e.student_id AND a.session_id=$1
+    //    WHERE e.class_id=$2`,
+    //   [req.params.id, result.rows[0].class_id]
+    // );
 
     res.json({ session: result.rows[0], attendance: attendance.rows });
   } catch (err) {
